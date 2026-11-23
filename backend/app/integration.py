@@ -24,6 +24,7 @@ from app.models import (
     ProxyNode, QualitySample, RawExtractedContent, SampleMethod,
     SchedulePlan, SiteConfig, SiteType, StorageBatch, UrlFingerprint,
 )
+from app.services.scheduling import register_plan
 from app.store import store
 
 
@@ -33,9 +34,14 @@ from app.store import store
 
 def run_crawl_pipeline(site_row: dict[str, Any], job_row: dict[str, Any],
                        extract_rows: list[dict[str, Any]],
-                       clean_rows: list[dict[str, Any]]) -> StorageBatch | None:
+                       clean_rows: list[dict[str, Any]],
+                       entry_urls: list[str] | None = None,
+                       batch_id: str | None = None,
+                       now: datetime | None = None) -> StorageBatch | None:
     """端到端采集链路：站点配置 → 作业创建 → 内容抽取 → 字段清洗 → 批次存储。
 
+    entry_urls 用于演练/补跑时指定本轮实际入口；batch_id 用于锁定同一轮
+    产出的批次编号；now 用于固定本地时钟。
     返回完整的 StorageBatch 或 None（不可恢复错误时）。
     """
     # Step 1: 站点验证（crawl_site）
@@ -45,6 +51,8 @@ def run_crawl_pipeline(site_row: dict[str, Any], job_row: dict[str, Any],
 
     # Step 2: 创建采集作业（crawl_job）
     job = CrawlJobSpec.from_seed_row(job_row, site=site)
+    if entry_urls is not None:
+        job.entry_urls = [url for url in entry_urls if url]
     if not job.entry_urls:
         return None  # 没有入口 URL
 
@@ -90,14 +98,15 @@ def run_crawl_pipeline(site_row: dict[str, Any], job_row: dict[str, Any],
         cleaned.append(cc)
 
     # Step 5: 批次存储（batch_store）
+    stored_at = now or datetime.now(timezone.utc)
     batch = StorageBatch(
-        batch_id=f"BATCH-{job.job_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        batch_id=batch_id or f"BATCH-{job.job_id}-{stored_at.strftime('%Y%m%d%H%M%S')}",
         source_job_id=job.job_id,
         row_count=len(cleaned),
         storage_path=f"/data/batches/{job.job_id}/",
         compression="gzip",
         schema_version="v1",
-        stored_at=datetime.now(timezone.utc).isoformat(),
+        stored_at=stored_at.isoformat(),
         status="已落盘",
         records=cleaned,
     )
@@ -466,24 +475,15 @@ def compute_crawl_cost(job: CrawlJobSpec, proxy: ProxyNode | None) -> CostRecord
 # ---------------------------------------------------------------------------
 
 def schedule_job(job: CrawlJobSpec) -> SchedulePlan | None:
-    """为采集作业创建调度计划。"""
-    # 找关联的调度计划
-    for row in store.rows("scheduler"):
-        if str(row.get("关联作业")) == job.job_id:
-            plan = SchedulePlan.from_seed_row(row)
-            plan.next_run = datetime.now(timezone.utc).isoformat()
-            plan.status = "执行中" if job.status in ("待执行", "采集执行") else "已完成"
-            return plan
+    """为采集作业创建或复用调度计划。
 
-    # 创建新的调度计划
-    plan = SchedulePlan(
-        plan_id=f"SCHED-{job.job_id}",
-        linked_job_id=job.job_id,
-        cron_expr="0 */6 * * *",  # 每6小时
-        next_run=datetime.now(timezone.utc).isoformat(),
-        status="执行中" if job.status in ("待执行", "采集执行") else "已完成",
-    )
-    _persist_schedule(plan)
+    复用旧计划和首次登记都走同一份派生计算，只在这里转换成计划回执对象。
+    """
+    row, derived, _ = register_plan(job.job_id, job.status)
+    plan = SchedulePlan.from_seed_row(row)
+    # 回执字段保持不变：next_run 仍是执行时间，status 仍按作业状态推导。
+    plan.next_run = derived.execution_time
+    plan.status = derived.plan_status
     return plan
 
 
@@ -552,6 +552,9 @@ def handle_interrupted_pipeline(job: CrawlJobSpec) -> CrawlJobSpec:
 
 def _persist_batch(batch: StorageBatch) -> None:
     rows = store.rows("batch_store")
+    if any(str(row.get("批次编号")) == batch.batch_id for row in rows):
+        # 同一轮批次已经落地：重复执行只返回原批次，不再登记第二行。
+        return
     rows.append({
         "id": max((int(row.get("id", 0)) for row in rows), default=0) + 1,
         "批次编号": batch.batch_id,
@@ -669,12 +672,14 @@ def _persist_cost(c: CostRecord) -> None:
 
 
 def _persist_schedule(plan: SchedulePlan) -> None:
-    rows = store.rows("scheduler")
-    rows.append({
-        "id": max((int(r.get("id", 0)) for r in rows), default=0) + 1,
-        "计划编号": plan.plan_id, "关联作业": plan.linked_job_id,
-        "Cron表达式": plan.cron_expr, "时区设置": plan.timezone_setting,
-        "依赖检查": plan.dependency_check, "失败通知": plan.failure_notify,
-        "并发控制": plan.concurrency_control, "下次执行": plan.next_run,
-        "status": plan.status, "pending": False, "abnormal": False,
-    })
+    """兼容入口：登记计划统一走 scheduling.register_plan，避免重复关联。"""
+    register_plan(
+        plan.linked_job_id, plan.status,
+        plan_id=plan.plan_id, cron_expr=plan.cron_expr,
+        timezone_setting=plan.timezone_setting,
+        extra_fields={
+            "依赖检查": plan.dependency_check,
+            "失败通知": plan.failure_notify,
+            "并发控制": plan.concurrency_control,
+        },
+    )

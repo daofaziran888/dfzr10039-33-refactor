@@ -19,6 +19,7 @@ from app.services.robot_verify import RobotVerifyService
 from app.services.crawl_limit import CrawlLimitService
 from app.services.template_lib import TemplateLibService
 from app.services.scheduler import SchedulerService
+from app.services.crawl_execution import CrawlExecutionService
 from app.services.crawl_cost import CrawlCostService
 from app.services.data_archive import DataArchiveService
 from app.services.diff_check import DiffCheckService
@@ -43,6 +44,7 @@ SERVICES: dict[str, BaseModuleService] = {
     "crawl_limit": CrawlLimitService(),
     "template_lib": TemplateLibService(),
     "scheduler": SchedulerService(),
+    "crawl_execution": CrawlExecutionService(),
     "crawl_cost": CrawlCostService(),
     "data_archive": DataArchiveService(),
     "diff_check": DiffCheckService(),

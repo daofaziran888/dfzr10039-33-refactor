@@ -67,6 +67,7 @@ npm run dev
 | 采集限速 | `crawl_limit` | 限速策略 | 策略编号、目标站点、请求间隔 |
 | 模板库 | `template_lib` | 采集模板 | 模板编号、站点类型、模板名称 |
 | 调度编排 | `scheduler` | 调度计划 | 计划编号、关联作业、Cron表达式 |
+| 采集执行台账 | `crawl_execution` | 采集轮次 | 轮次、实际入口、批次编号、轮次状态 |
 | 采集计费 | `crawl_cost` | 用量记录 | 记录编号、采集站点、计费周期 |
 | 数据归档 | `data_archive` | 归档策略 | 策略编号、数据范围、归档周期 |
 | 差异检测 | `diff_check` | 差异记录 | 记录编号、目标站点、检测页面 |
@@ -80,6 +81,29 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 调度执行
+
+调度计算集中在 `backend/app/services/scheduling.py`：计划下次执行时间与计划状态
+由同一份「计划执行派生数据」推导，复用旧计划和首次登记共用这一处计算。
+旧计划的编号、Cron、时区原样沿用；首次登记沿用 `SCHED-<作业>`、每 6 小时、
+`Asia/Shanghai`。计划确认是原子的，同一作业只保留一条关联，试算不落库。
+
+`backend/app/services/crawl_execution.py` 是采集任务执行台账：一轮采集一个实际入口，
+完成先于回执落定。迟到的执行中结果只能回填尚未完成的轮次；同轮补跑复用原入口与
+已落地批次；完成（即使回执中断）不会拦住下一轮。
+
+页面：`/schedule_execution`（调度执行），可做计划试算/确认、按轮次查看台账、
+分步回放 E5。后端接口在 `/api/schedule/*`，E5 一键演练为
+`POST /api/schedule/e5/next-round`。
+
+```bash
+# 固定时钟，回放 E5（含下一轮）
+curl -X POST http://127.0.0.1:8000/api/schedule/e5/next-round \
+  -H 'Content-Type: application/json' \
+  -d '{"job_id":"CRAW-E5-DEMO","entry_url":"https://e5.example.com/list",
+       "base_time":"2026-11-23T10:00:00+08:00"}'
+```
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA

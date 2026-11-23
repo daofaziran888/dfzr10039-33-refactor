@@ -190,6 +190,17 @@ export const MODULES: ModuleMeta[] = [
     metrics: ["计划总数", "执行中计划", "待激活计划"],
   },
   {
+    key: "crawl_execution",
+    name: "采集执行台账",
+    entity: "采集轮次",
+    desc: "记录每一轮采集的实际入口、落地批次和完成回执，补跑据此查回本轮批次。",
+    fields: ["轮次", "关联作业", "计划编号", "实际入口", "批次编号", "批次数量", "轮次状态", "计划时间"],
+    statuses: ["执行中", "已完成"],
+    actions: ["补跑轮次", "确认完成"],
+    actionTargets: {"补跑轮次": "执行中", "确认完成": "已完成"},
+    metrics: ["轮次总数", "已完成轮次", "执行中轮次"],
+  },
+  {
     key: "crawl_cost",
     name: "采集计费",
     entity: "用量记录",
